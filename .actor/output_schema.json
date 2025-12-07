@@ -1,0 +1,22 @@
+{
+  "actorOutputSchemaVersion": 1,
+  "title": "MCP Server Output",
+  "type": "object",
+  "properties": {
+    "mcpUrl": {
+      "type": "string",
+      "title": "MCP Server URL",
+      "template": "{{run.containerUrl}}/mcp"
+    },
+    "claudeCommand": {
+      "type": "string",
+      "title": "Claude CLI Command",
+      "template": "claude mcp add api-docs {{run.containerUrl}}/mcp --transport http --header \"Authorization: Bearer <YOUR_APIFY_TOKEN>\""
+    },
+    "apifyTokenInfo": {
+      "type": "string",
+      "title": "Get Your Apify Token",
+      "template": "https://console.apify.com/account/integrations"
+    }
+  }
+}
