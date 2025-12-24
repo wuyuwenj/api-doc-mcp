@@ -1,6 +1,6 @@
 {
     "actorSpecification": 1,
-    "name": "apify-docs-mcp",
+    "name": "api-doc-mcp",
     "title": "TypeScript MCP server",
     "description": "TypeScript Model Context Protocol server with streamable HTTP transport.",
     "version": "0.0",
@@ -45,6 +45,6 @@
     "webServerMcpPath": "/mcp",
     "environmentVariables": {
         "SUPABASE_URL": "https://sllmmbkaketdqfvehysq.supabase.co",
-        "SUPABASE_KEY": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNsbG1tYmtha2V0ZHFmdmVoeXNxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjY1Njk4MjgsImV4cCI6MjA4MjE0NTgyOH0.IzSg6yAT2kPLirWZHtwwynFucusFqPg2RFOLPF-IWU0"
+        "SUPABASE_KEY": "@supabaseKey"
     }
 }
