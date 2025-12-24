@@ -1,46 +1,50 @@
 {
-	"actorSpecification": 1,
-	"name": "apify-docs-mcp",
-	"title": "TypeScript MCP server",
-	"description": "TypeScript Model Context Protocol server with streamable HTTP transport.",
-	"version": "0.0",
-	"buildTag": "latest",
-	"usesStandbyMode": true,
-	"meta": {
-		"templateId": "ts-mcp-empty",
-		"generatedBy": "<FILL-IN-MODEL>"
-	},
-	"input": {
-		"title": "Actor input schema",
-		"description": "Configure which documentation to scrape",
-		"type": "object",
-		"schemaVersion": 1,
-		"properties": {
-			"startUrls": {
-				"title": "Start URLs",
-				"type": "array",
-				"description": "List of documentation URLs to start scraping from",
-				"editor": "requestListSources",
-				"default": [
-					{ "url": "https://docs.apify.com/sdk/js/docs" },
-					{ "url": "https://docs.apify.com/sdk/js/reference" }
-				],
-				"prefill": [
-					{ "url": "https://docs.apify.com/sdk/js/docs" },
-					{ "url": "https://docs.apify.com/sdk/js/reference" }
-				]
-			},
-			"maxPages": {
-				"title": "Max Pages",
-				"type": "integer",
-				"description": "Maximum number of pages to scrape",
-				"default": 100,
-				"minimum": 1,
-				"maximum": 1000
-			}
-		},
-		"required": []
-	},
-	"dockerfile": "../Dockerfile",
-	"webServerMcpPath": "/mcp"
+    "actorSpecification": 1,
+    "name": "apify-docs-mcp",
+    "title": "TypeScript MCP server",
+    "description": "TypeScript Model Context Protocol server with streamable HTTP transport.",
+    "version": "0.0",
+    "buildTag": "latest",
+    "usesStandbyMode": true,
+    "meta": {
+        "templateId": "ts-mcp-empty",
+        "generatedBy": "<FILL-IN-MODEL>"
+    },
+    "input": {
+        "title": "Actor input schema",
+        "description": "Configure which documentation to scrape",
+        "type": "object",
+        "schemaVersion": 1,
+        "properties": {
+            "startUrls": {
+                "title": "Start URLs",
+                "type": "array",
+                "description": "List of documentation URLs to start scraping from",
+                "editor": "requestListSources",
+                "default": [
+                    { "url": "https://docs.apify.com/sdk/js/docs" },
+                    { "url": "https://docs.apify.com/sdk/js/reference" }
+                ],
+                "prefill": [
+                    { "url": "https://docs.apify.com/sdk/js/docs" },
+                    { "url": "https://docs.apify.com/sdk/js/reference" }
+                ]
+            },
+            "maxPages": {
+                "title": "Max Pages",
+                "type": "integer",
+                "description": "Maximum number of pages to scrape",
+                "default": 100,
+                "minimum": 1,
+                "maximum": 1000
+            }
+        },
+        "required": []
+    },
+    "dockerfile": "../Dockerfile",
+    "webServerMcpPath": "/mcp",
+    "environmentVariables": {
+        "SUPABASE_URL": "https://sllmmbkaketdqfvehysq.supabase.co",
+        "SUPABASE_KEY": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNsbG1tYmtha2V0ZHFmdmVoeXNxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjY1Njk4MjgsImV4cCI6MjA4MjE0NTgyOH0.IzSg6yAT2kPLirWZHtwwynFucusFqPg2RFOLPF-IWU0"
+    }
 }

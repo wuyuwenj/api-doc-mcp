@@ -1,31 +1,19 @@
+// MCP tools for RAG-based documentation retrieval
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import * as z from 'zod';
 import { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { log } from 'apify';
-import { DocPage } from './scraper.js';
+import { getVectorDB } from './vectordb.js';
+import { generateEmbedding } from './embeddings.js';
 
-// Helper function for relevance scoring
-function calculateRelevance(text: string, query: string): number {
-    const words = query.toLowerCase().split(/\s+/);
-    let score = 0;
+export function registerTools(server: McpServer) {
+    const vectorDb = getVectorDB();
 
-    words.forEach((word) => {
-        const regex = new RegExp(word, 'gi');
-        const matches = text.match(regex);
-        if (matches) {
-            score += matches.length;
-        }
-    });
-
-    return score;
-}
-
-export function registerTools(server: McpServer, docs: DocPage[]) {
-    // Tool 1: List Available Docs
+    // Tool 1: List Documents (lightweight overview)
     server.registerTool(
-        'list_available_docs',
+        'list_docs',
         {
-            description: 'Lists all available Apify SDK documentation pages. Use this to discover what documentation is available.',
+            description: 'List all available documentation. Returns metadata only (id, title, summary, sections) without full content. Use this to discover what documentation is available.',
             inputSchema: {
                 type: z.enum(['all', 'api', 'guide', 'example']).optional().default('all').describe('Filter by document type'),
             },
@@ -34,12 +22,15 @@ export function registerTools(server: McpServer, docs: DocPage[]) {
             try {
                 log.info(`Listing docs of type: ${type}`);
 
-                const filteredDocs = type === 'all' ? docs : docs.filter((d) => d.type === type);
+                const docs = await vectorDb.listDocs(type === 'all' ? undefined : type);
 
-                const summary = filteredDocs.map((d) => ({
+                const summary = docs.map((d) => ({
                     id: d.id,
                     title: d.title,
                     type: d.type,
+                    summary: d.summary,
+                    sections: d.sections,
+                    total_chunks: d.total_chunks,
                     url: d.url,
                 }));
 
@@ -49,8 +40,8 @@ export function registerTools(server: McpServer, docs: DocPage[]) {
                             type: 'text',
                             text: JSON.stringify(
                                 {
-                                    total: filteredDocs.length,
-                                    pages: summary,
+                                    total: docs.length,
+                                    docs: summary,
                                 },
                                 null,
                                 2,
@@ -59,84 +50,87 @@ export function registerTools(server: McpServer, docs: DocPage[]) {
                     ],
                 };
             } catch (error) {
-                log.error('Error in list_available_docs:', { error });
+                log.error('Error in list_docs:', { error });
                 throw error;
             }
         },
     );
 
-    // Tool 2: Search Docs
+    // Tool 2: Semantic Search (main entry point)
     server.registerTool(
-        'search_docs',
+        'search',
         {
-            description: 'Search through Apify SDK documentation. Returns the most relevant results based on the search query.',
+            description: 'Semantic search across all documentation. Returns the most relevant chunks based on meaning, not just keyword matching. Use this as your primary way to find information.',
             inputSchema: {
-                query: z.string().describe('Search query - can be keywords, function names, or concepts'),
-                result_limit: z.number().optional().default(5).describe('Maximum number of results to return'),
+                query: z.string().describe('Natural language search query - describe what you\'re looking for'),
+                limit: z.number().optional().default(5).describe('Maximum number of chunks to return (default: 5)'),
             },
         },
-        async ({ query, result_limit }): Promise<CallToolResult> => {
+        async ({ query, limit }): Promise<CallToolResult> => {
             try {
-                log.info(`Searching for: ${query}`);
+                log.info(`Semantic search for: ${query}`);
 
-                const searchTerm = query.toLowerCase();
+                // Generate embedding for query
+                const queryEmbedding = await generateEmbedding(query);
 
-                // Simple relevance scoring
-                const results = docs
-                    .map((doc) => ({
-                        ...doc,
-                        score: calculateRelevance(doc.searchableText, searchTerm),
-                    }))
-                    .filter((doc) => doc.score > 0)
-                    .sort((a, b) => b.score - a.score)
-                    .slice(0, result_limit)
-                    .map((doc) => ({
-                        id: doc.id,
-                        title: doc.title,
-                        snippet: doc.snippet,
-                        type: doc.type,
-                        url: doc.url,
-                        relevance: doc.score.toFixed(2),
-                    }));
+                // Search similar chunks
+                const results = await vectorDb.searchSimilar(queryEmbedding, limit);
+
+                const formattedResults = results.map((r) => ({
+                    doc_id: r.doc_id,
+                    doc_title: r.doc_title,
+                    section: r.section_path.join(' > '),
+                    heading: r.heading,
+                    content: r.content,
+                    similarity: r.similarity.toFixed(3),
+                }));
 
                 return {
                     content: [
                         {
                             type: 'text',
-                            text: JSON.stringify({ query, results_count: results.length, results }, null, 2),
+                            text: JSON.stringify(
+                                {
+                                    query,
+                                    results_count: results.length,
+                                    results: formattedResults,
+                                },
+                                null,
+                                2,
+                            ),
                         },
                     ],
                 };
             } catch (error) {
-                log.error('Error in search_docs:', { error });
+                log.error('Error in search:', { error });
                 throw error;
             }
         },
     );
 
-    // Tool 3: Get Docs by ID
+    // Tool 3: Get Document Overview
     server.registerTool(
-        'get_docs_by_id',
+        'get_doc_overview',
         {
-            description: 'Retrieve full content of a specific documentation page by its ID. Use this after searching to get complete details.',
+            description: 'Get overview of a specific document including its summary and section structure. Use this before diving into specific sections.',
             inputSchema: {
-                id: z.string().describe('Documentation page ID (e.g., "apify-sdk-1")'),
+                doc_id: z.string().describe('Document ID (e.g., "doc-1")'),
             },
         },
-        async ({ id }): Promise<CallToolResult> => {
+        async ({ doc_id }): Promise<CallToolResult> => {
             try {
-                log.info(`Fetching doc: ${id}`);
+                log.info(`Getting overview for doc: ${doc_id}`);
 
-                const doc = docs.find((d) => d.id === id);
+                const metadata = await vectorDb.getDocMetadata(doc_id);
 
-                if (!doc) {
+                if (!metadata) {
                     return {
                         content: [
                             {
                                 type: 'text',
                                 text: JSON.stringify({
                                     error: 'Document not found',
-                                    available_ids: docs.slice(0, 10).map((d) => d.id),
+                                    doc_id,
                                 }),
                             },
                         ],
@@ -149,12 +143,13 @@ export function registerTools(server: McpServer, docs: DocPage[]) {
                             type: 'text',
                             text: JSON.stringify(
                                 {
-                                    id: doc.id,
-                                    title: doc.title,
-                                    type: doc.type,
-                                    url: doc.url,
-                                    content: doc.content,
-                                    apiReference: doc.apiReference,
+                                    id: metadata.id,
+                                    title: metadata.title,
+                                    type: metadata.type,
+                                    url: metadata.url,
+                                    summary: metadata.summary,
+                                    sections: metadata.sections,
+                                    total_chunks: metadata.total_chunks,
                                 },
                                 null,
                                 2,
@@ -163,108 +158,46 @@ export function registerTools(server: McpServer, docs: DocPage[]) {
                     ],
                 };
             } catch (error) {
-                log.error('Error in get_docs_by_id:', { error });
+                log.error('Error in get_doc_overview:', { error });
                 throw error;
             }
         },
     );
 
-    // Tool 4: Get API Reference
+    // Tool 4: Get Section Content
     server.registerTool(
-        'get_api_reference',
+        'get_section',
         {
-            description: 'Get API reference for a specific function, class, or method. Use this to find signatures, parameters, and usage examples.',
+            description: 'Get content of a specific section within a document. Use the section names from get_doc_overview.',
             inputSchema: {
-                name: z.string().describe('Function, class, or method name (e.g., "Actor.pushData", "CheerioCrawler", "Dataset")'),
+                doc_id: z.string().describe('Document ID (e.g., "doc-1")'),
+                section: z.string().describe('Section name to retrieve (e.g., "Best Practices", "Examples")'),
             },
         },
-        async ({ name }): Promise<CallToolResult> => {
+        async ({ doc_id, section }): Promise<CallToolResult> => {
             try {
-                log.info(`Getting API reference for: ${name}`);
+                log.info(`Getting section "${section}" from doc: ${doc_id}`);
 
-                const searchName = name.toLowerCase();
-                const apiDocs = docs.filter(
-                    (d) => d.type === 'api' && (d.title.toLowerCase().includes(searchName) || d.searchableText.includes(searchName)),
-                );
+                const chunks = await vectorDb.getChunksBySection(doc_id, [section]);
 
-                if (apiDocs.length === 0) {
-                    // Try broader search
-                    const broadResults = docs
-                        .filter((d) => d.searchableText.includes(searchName))
-                        .slice(0, 3)
-                        .map((d) => ({ id: d.id, title: d.title, type: d.type }));
+                if (chunks.length === 0) {
+                    // Try partial match
+                    const { chunks: allChunks } = await vectorDb.getChunks(doc_id);
+                    const matchingChunks = allChunks.filter((c) =>
+                        c.section_path.some((p) => p.toLowerCase().includes(section.toLowerCase()))
+                        || c.heading.toLowerCase().includes(section.toLowerCase()),
+                    );
 
-                    return {
-                        content: [
-                            {
-                                type: 'text',
-                                text: JSON.stringify({
-                                    error: `API reference not found for "${name}"`,
-                                    suggestions: broadResults,
-                                }),
-                            },
-                        ],
-                    };
-                }
-
-                const doc = apiDocs[0];
-                return {
-                    content: [
-                        {
-                            type: 'text',
-                            text: JSON.stringify(
-                                {
-                                    name: doc.title,
-                                    type: doc.type,
-                                    url: doc.url,
-                                    content: doc.content,
-                                    apiReference: doc.apiReference,
-                                },
-                                null,
-                                2,
-                            ),
-                        },
-                    ],
-                };
-            } catch (error) {
-                log.error('Error in get_api_reference:', { error });
-                throw error;
-            }
-        },
-    );
-
-    // Tool 5: Get Code Example
-    server.registerTool(
-        'get_code_example',
-        {
-            description: 'Get code examples for a specific feature or concept. Use this to find working code snippets.',
-            inputSchema: {
-                feature: z.string().describe('Feature or concept name (e.g., "CheerioCrawler", "proxy rotation", "request queue")'),
-            },
-        },
-        async ({ feature }): Promise<CallToolResult> => {
-            try {
-                log.info(`Getting code example for: ${feature}`);
-
-                const searchFeature = feature.toLowerCase();
-                const exampleDocs = docs.filter(
-                    (d) => (d.type === 'example' || d.apiReference?.example) && d.searchableText.includes(searchFeature),
-                );
-
-                if (exampleDocs.length === 0) {
-                    // Try to find any doc with code examples
-                    const docsWithCode = docs
-                        .filter((d) => d.apiReference?.example && d.searchableText.includes(searchFeature))
-                        .slice(0, 3);
-
-                    if (docsWithCode.length === 0) {
+                    if (matchingChunks.length === 0) {
                         return {
                             content: [
                                 {
                                     type: 'text',
                                     text: JSON.stringify({
-                                        error: `No examples found for "${feature}"`,
-                                        suggestion: 'Try searching with different keywords using search_docs',
+                                        error: 'Section not found',
+                                        doc_id,
+                                        section,
+                                        available_sections: [...new Set(allChunks.flatMap((c) => c.section_path))],
                                     }),
                                 },
                             ],
@@ -277,11 +210,13 @@ export function registerTools(server: McpServer, docs: DocPage[]) {
                                 type: 'text',
                                 text: JSON.stringify(
                                     {
-                                        feature,
-                                        examples: docsWithCode.map((d) => ({
-                                            title: d.title,
-                                            url: d.url,
-                                            code: d.apiReference?.example,
+                                        doc_id,
+                                        section,
+                                        chunks_count: matchingChunks.length,
+                                        chunks: matchingChunks.map((c) => ({
+                                            heading: c.heading,
+                                            section_path: c.section_path.join(' > '),
+                                            content: c.content,
                                         })),
                                     },
                                     null,
@@ -292,17 +227,20 @@ export function registerTools(server: McpServer, docs: DocPage[]) {
                     };
                 }
 
-                const doc = exampleDocs[0];
                 return {
                     content: [
                         {
                             type: 'text',
                             text: JSON.stringify(
                                 {
-                                    feature,
-                                    title: doc.title,
-                                    url: doc.url,
-                                    example: doc.apiReference?.example || doc.content,
+                                    doc_id,
+                                    section,
+                                    chunks_count: chunks.length,
+                                    chunks: chunks.map((c) => ({
+                                        heading: c.heading,
+                                        section_path: c.section_path.join(' > '),
+                                        content: c.content,
+                                    })),
                                 },
                                 null,
                                 2,
@@ -311,7 +249,137 @@ export function registerTools(server: McpServer, docs: DocPage[]) {
                     ],
                 };
             } catch (error) {
-                log.error('Error in get_code_example:', { error });
+                log.error('Error in get_section:', { error });
+                throw error;
+            }
+        },
+    );
+
+    // Tool 5: Get Chunks (paginated access to all chunks)
+    server.registerTool(
+        'get_chunks',
+        {
+            description: 'Get chunks from a document with pagination. Use sparingly - prefer search or get_section for targeted retrieval.',
+            inputSchema: {
+                doc_id: z.string().describe('Document ID (e.g., "doc-1")'),
+                limit: z.number().optional().default(10).describe('Number of chunks to return (default: 10)'),
+                offset: z.number().optional().default(0).describe('Offset for pagination (default: 0)'),
+            },
+        },
+        async ({ doc_id, limit, offset }): Promise<CallToolResult> => {
+            try {
+                log.info(`Getting chunks for doc: ${doc_id}, limit: ${limit}, offset: ${offset}`);
+
+                const { chunks, total } = await vectorDb.getChunks(doc_id, limit, offset);
+
+                if (chunks.length === 0) {
+                    const docs = await vectorDb.listDocs();
+                    return {
+                        content: [
+                            {
+                                type: 'text',
+                                text: JSON.stringify({
+                                    error: 'Document not found or has no chunks',
+                                    doc_id,
+                                    available_docs: docs.slice(0, 10).map((d) => d.id),
+                                }),
+                            },
+                        ],
+                    };
+                }
+
+                return {
+                    content: [
+                        {
+                            type: 'text',
+                            text: JSON.stringify(
+                                {
+                                    doc_id,
+                                    total_chunks: total,
+                                    returned: chunks.length,
+                                    offset,
+                                    has_more: offset + chunks.length < total,
+                                    chunks: chunks.map((c) => ({
+                                        chunk_index: c.chunk_index,
+                                        heading: c.heading,
+                                        section_path: c.section_path.join(' > '),
+                                        content: c.content,
+                                        token_count: c.token_count,
+                                    })),
+                                },
+                                null,
+                                2,
+                            ),
+                        },
+                    ],
+                };
+            } catch (error) {
+                log.error('Error in get_chunks:', { error });
+                throw error;
+            }
+        },
+    );
+
+    // Tool 6: Search within document
+    server.registerTool(
+        'search_in_doc',
+        {
+            description: 'Semantic search within a specific document. Use when you know which document to search but need to find specific information within it.',
+            inputSchema: {
+                doc_id: z.string().describe('Document ID to search within'),
+                query: z.string().describe('Search query'),
+                limit: z.number().optional().default(3).describe('Maximum chunks to return'),
+            },
+        },
+        async ({ doc_id, query, limit }): Promise<CallToolResult> => {
+            try {
+                log.info(`Searching in doc ${doc_id} for: ${query}`);
+
+                // Generate embedding for query
+                const queryEmbedding = await generateEmbedding(query);
+
+                // Search similar chunks within doc
+                const results = await vectorDb.searchSimilar(queryEmbedding, limit, doc_id);
+
+                if (results.length === 0) {
+                    return {
+                        content: [
+                            {
+                                type: 'text',
+                                text: JSON.stringify({
+                                    error: 'No matching content found',
+                                    doc_id,
+                                    query,
+                                }),
+                            },
+                        ],
+                    };
+                }
+
+                return {
+                    content: [
+                        {
+                            type: 'text',
+                            text: JSON.stringify(
+                                {
+                                    doc_id,
+                                    query,
+                                    results_count: results.length,
+                                    results: results.map((r) => ({
+                                        section: r.section_path.join(' > '),
+                                        heading: r.heading,
+                                        content: r.content,
+                                        similarity: r.similarity.toFixed(3),
+                                    })),
+                                },
+                                null,
+                                2,
+                            ),
+                        },
+                    ],
+                };
+            } catch (error) {
+                log.error('Error in search_in_doc:', { error });
                 throw error;
             }
         },

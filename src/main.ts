@@ -4,72 +4,90 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
 import cors from 'cors';
 import { log, Actor } from 'apify';
-import { scrapeApifyDocs, DocPage } from './scraper.js';
+import { scrapeDocs } from './scraper.js';
 import { registerTools } from './tools.js';
+import { getVectorDB } from './vectordb.js';
 
 // Initialize the Apify Actor environment
 await Actor.init();
 
-// Global docs storage
-let cachedDocs: DocPage[] = [];
+// Validate required environment variables
+function validateEnv() {
+    const required = ['SUPABASE_URL', 'SUPABASE_KEY'];
+    const missing = required.filter((key) => !process.env[key]);
+
+    if (missing.length > 0) {
+        log.error(`Missing required environment variables: ${missing.join(', ')}`);
+        log.info('Please set the following environment variables:');
+        log.info('  SUPABASE_URL - Your Supabase project URL');
+        log.info('  SUPABASE_KEY - Your Supabase anon or service key');
+        process.exit(1);
+    }
+}
+
+validateEnv();
 
 interface ActorInput {
     startUrls?: Array<{ url: string }>;
     maxPages?: number;
+    forceRefresh?: boolean;
 }
 
 // Initialize documentation on startup
 async function initializeDocs() {
     log.info('Initializing documentation...');
 
-    // Try to load from Key-Value Store first (cache)
-    const cached = await Actor.getValue<DocPage[]>('scraped-docs');
+    const input = await Actor.getInput<ActorInput>() ?? {};
+    const startUrls = input.startUrls?.map((item) => item.url) ?? undefined;
+    const maxPages = input.maxPages ?? undefined;
+    const forceRefresh = input.forceRefresh ?? false;
 
-    if (cached && cached.length > 0) {
-        log.info(`Loaded ${cached.length} docs from cache`);
-        cachedDocs = cached;
-    } else {
-        log.info('Scraping documentation (this may take a few minutes)...');
-        try {
-            // Read Actor input
-            const input = await Actor.getInput<ActorInput>() ?? {};
+    // Check if we have existing docs in the database
+    const vectorDb = getVectorDB();
+    const existingDocs = await vectorDb.listDocs();
 
-            // Extract URLs from input format
-            const startUrls = input.startUrls?.map((item) => item.url) ?? undefined;
-            const maxPages = input.maxPages ?? undefined;
-
-            log.info('Scraping with configuration:', { startUrls, maxPages });
-
-            cachedDocs = await scrapeApifyDocs({
-                startUrls,
-                maxPages,
-            });
-            await Actor.setValue('scraped-docs', cachedDocs);
-            log.info(`Documentation cached: ${cachedDocs.length} pages`);
-        } catch (error) {
-            log.error('Failed to scrape documentation:', { error });
-            cachedDocs = [];
-        }
+    if (existingDocs.length > 0 && !forceRefresh) {
+        log.info(`Found ${existingDocs.length} existing docs in database, skipping scrape`);
+        log.info('Set forceRefresh: true in input to re-scrape');
+        return existingDocs.length;
     }
 
-    log.info(`Loaded ${cachedDocs.length} documentation pages`);
+    if (forceRefresh && existingDocs.length > 0) {
+        log.info('Force refresh enabled, clearing existing data...');
+        await vectorDb.clearAll();
+    }
+
+    log.info('Scraping documentation (this may take a few minutes)...');
+    log.info('Scraping with configuration:', { startUrls, maxPages });
+
+    try {
+        const result = await scrapeDocs({
+            startUrls,
+            maxPages,
+        });
+        log.info(`Scraping complete: ${result.docsProcessed} docs, ${result.chunksCreated} chunks`);
+        return result.docsProcessed;
+    } catch (error) {
+        log.error('Failed to scrape documentation:', { error });
+        return 0;
+    }
 }
 
 // Initialize docs before starting server
-await initializeDocs();
+const docsCount = await initializeDocs();
 
 const getServer = () => {
     // Create an MCP server with implementation details
     const server = new McpServer(
         {
             name: 'api-docs-mcp',
-            version: '1.0.0',
+            version: '2.0.0',
         },
         { capabilities: { logging: {} } },
     );
 
     // Register all documentation tools
-    registerTools(server, cachedDocs);
+    registerTools(server);
 
     // Create a resource for server info
     server.registerResource(
@@ -77,11 +95,27 @@ const getServer = () => {
         'https://apify.com/docs-mcp/info',
         { mimeType: 'text/plain' },
         async (): Promise<ReadResourceResult> => {
+            const vectorDb = getVectorDB();
+            const docs = await vectorDb.listDocs();
+
             return {
                 contents: [
                     {
                         uri: 'https://apify.com/docs-mcp/info',
-                        text: `Apify Docs MCP Server\n\nThis MCP server provides access to Apify SDK documentation.\n\nAvailable tools:\n- list_available_docs: List all documentation pages\n- search_docs: Search through documentation\n- get_docs_by_id: Get full content of a specific page\n- get_api_reference: Get API reference for functions/classes\n- get_code_example: Get code examples for features\n\nDocumentation pages loaded: ${cachedDocs.length}`,
+                        text: `API Docs MCP Server v2.0 (RAG-enabled)
+
+This MCP server provides semantic search access to documentation using RAG (Retrieval-Augmented Generation).
+
+Available tools:
+- list_docs: List all documentation with metadata
+- search: Semantic search across all docs (main entry point)
+- get_doc_overview: Get document summary and sections
+- get_section: Get specific section content
+- get_chunks: Paginated chunk access
+- search_in_doc: Search within a specific document
+
+Documentation loaded: ${docs.length} documents
+Backend: Supabase pgvector`,
                     },
                 ],
             };
@@ -103,7 +137,7 @@ app.use(
 );
 
 // Readiness probe and status endpoint
-app.get('/', (req: Request, res: Response) => {
+app.get('/', async (req: Request, res: Response) => {
     if (req.headers['x-apify-container-server-readiness-probe']) {
         log.info('Readiness probe');
         res.end('ok\n');
@@ -121,13 +155,23 @@ app.get('/', (req: Request, res: Response) => {
     // Generate the Claude CLI command
     const cliCommand = `claude mcp add --transport http api-docs ${mcpUrl} --header "Authorization: Bearer YOUR_APIFY_TOKEN"`;
 
+    // Get doc count from database
+    const vectorDb = getVectorDB();
+    const docs = await vectorDb.listDocs();
+
     // Return server status for regular GET requests
     res.json({
         status: 'running',
         name: 'api-docs-mcp',
-        version: '1.0.0',
-        docs_loaded: cachedDocs.length,
-        tools: ['list_available_docs', 'search_docs', 'get_docs_by_id', 'get_api_reference', 'get_code_example'],
+        version: '2.0.0',
+        docs_loaded: docs.length,
+        features: {
+            semantic_search: true,
+            chunking: 'recursive',
+            embeddings: 'openrouter/text-embedding-3-small',
+            vector_db: 'supabase-pgvector',
+        },
+        tools: ['list_docs', 'search', 'get_doc_overview', 'get_section', 'get_chunks', 'search_in_doc'],
         mcp_endpoint: mcpUrl,
         cli_command: cliCommand,
         setup_instructions: {
@@ -196,24 +240,55 @@ app.delete('/mcp', (_req: Request, res: Response) => {
 
 // Endpoint to refresh documentation cache
 app.post('/refresh-docs', async (_req: Request, res: Response) => {
-    log.info('Refreshing documentation cache...');
+    log.info('Refreshing documentation...');
     try {
-        // Re-read Actor input for refresh
         const input = await Actor.getInput<ActorInput>() ?? {};
         const startUrls = input.startUrls?.map((item) => item.url) ?? undefined;
         const maxPages = input.maxPages ?? undefined;
 
         log.info('Refreshing with configuration:', { startUrls, maxPages });
 
-        cachedDocs = await scrapeApifyDocs({
+        // Clear existing data
+        const vectorDb = getVectorDB();
+        await vectorDb.clearAll();
+
+        // Re-scrape
+        const result = await scrapeDocs({
             startUrls,
             maxPages,
         });
-        await Actor.setValue('scraped-docs', cachedDocs);
-        res.json({ success: true, docs_loaded: cachedDocs.length });
+
+        res.json({
+            success: true,
+            docs_processed: result.docsProcessed,
+            chunks_created: result.chunksCreated,
+        });
     } catch (error) {
         log.error('Failed to refresh docs:', { error });
         res.status(500).json({ success: false, error: 'Failed to refresh documentation' });
+    }
+});
+
+// Endpoint to get stats
+app.get('/stats', async (_req: Request, res: Response) => {
+    try {
+        const vectorDb = getVectorDB();
+        const docs = await vectorDb.listDocs();
+
+        const totalChunks = docs.reduce((sum, d) => sum + d.total_chunks, 0);
+
+        res.json({
+            total_docs: docs.length,
+            total_chunks: totalChunks,
+            docs_by_type: {
+                api: docs.filter((d) => d.type === 'api').length,
+                guide: docs.filter((d) => d.type === 'guide').length,
+                example: docs.filter((d) => d.type === 'example').length,
+            },
+        });
+    } catch (error) {
+        log.error('Failed to get stats:', { error });
+        res.status(500).json({ error: 'Failed to get stats' });
     }
 });
 
@@ -225,7 +300,7 @@ app.listen(PORT, (error) => {
         process.exit(1);
     }
     log.info(`MCP Server listening on port ${PORT}`);
-    log.info(`Documentation pages loaded: ${cachedDocs.length}`);
+    log.info(`Documentation pages loaded: ${docsCount}`);
 
     // Output the CLI command for easy setup
     const webServerUrl = process.env.ACTOR_WEB_SERVER_URL;
